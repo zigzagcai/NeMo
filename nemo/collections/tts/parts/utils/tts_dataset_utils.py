@@ -14,14 +14,18 @@
 
 import functools
 import os
+import random
+import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 from einops import rearrange
 from scipy import ndimage
 from torch.special import gammaln
+
+from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 
 
 def get_abs_rel_paths(input_path: Path, base_path: Path) -> Tuple[Path, Path]:
@@ -230,3 +234,107 @@ def get_weighted_sampler(
     num_samples = batch_size * num_steps
     sampler = torch.utils.data.WeightedRandomSampler(weights=weights, num_samples=num_samples)
     return sampler
+
+
+def _read_audio(
+    audio_filepath: Path, sample_rate: int, offset: float, duration: float, n_retries: int = 5
+) -> AudioSegment:
+    # Retry file read multiple times as file seeking can produce random IO errors.
+    # https://github.com/bastibe/python-soundfile/issues/274
+    for _ in range(n_retries):
+        try:
+            return AudioSegment.from_file(audio_filepath, target_sr=sample_rate, offset=offset, duration=duration,)
+        except Exception:
+            traceback.print_exc()
+
+    raise ValueError(f"Failed to read audio {audio_filepath}")
+
+
+def _segment_audio(
+    audio_filepath: Path, sample_rate: int, offset: float, n_samples: int, n_retries: int = 5
+) -> AudioSegment:
+    for _ in range(n_retries):
+        try:
+            return AudioSegment.segment_from_file(
+                audio_filepath, target_sr=sample_rate, n_segments=n_samples, offset=offset
+            )
+        except Exception:
+            traceback.print_exc()
+
+    raise ValueError(f"Failed to segment audio {audio_filepath}")
+
+
+def load_audio(
+    manifest_entry: Dict[str, Any],
+    audio_dir: Path,
+    sample_rate: int,
+    max_duration: Optional[float] = None,
+    volume_level: Optional[float] = None,
+) -> Tuple[np.ndarray, Path, Path]:
+    """
+    Load audio file from a manifest entry.
+
+    Args:
+        manifest_entry: Manifest entry dictionary.
+        audio_dir: base directory where audio is stored.
+        sample_rate: Sample rate to load audio as.
+        max_duration: Optional float, maximum amount of audio to read, in seconds.
+        volume_level: Optional float [0, 1], if provided audio will be normalized to the input volume.
+
+    Returns:
+        Audio array, and absolute and relative paths to audio file.
+    """
+    audio_filepath_abs, audio_filepath_rel = get_audio_filepaths(manifest_entry=manifest_entry, audio_dir=audio_dir)
+    offset = manifest_entry.get("offset", 0.0)
+    duration = manifest_entry["duration"]
+
+    if max_duration is not None:
+        duration = min(duration, max_duration)
+
+    audio_segment = _read_audio(
+        audio_filepath=audio_filepath_abs, sample_rate=sample_rate, offset=offset, duration=duration
+    )
+    audio = audio_segment.samples
+
+    if volume_level is not None:
+        audio = normalize_volume(audio, volume_level=volume_level)
+
+    return audio, audio_filepath_abs, audio_filepath_rel
+
+
+def sample_audio(
+    manifest_entry: Dict[str, Any],
+    audio_dir: Path,
+    sample_rate: int,
+    n_samples: int,
+    volume_level: Optional[float] = None,
+) -> Tuple[np.ndarray, Path, Path]:
+    """
+    Randomly sample an audio segment from a manifest entry.
+
+    Args:
+        manifest_entry: Manifest entry dictionary.
+        audio_dir: base directory where audio is stored.
+        sample_rate: Sample rate to load audio as.
+        n_samples: Size of audio segment to sample.
+        volume_level: Optional float [0, 1], if provided audio will be normalized to the input volume.
+
+    Returns:
+        Audio array, and absolute and relative paths to audio file.
+    """
+    audio_filepath_abs, audio_filepath_rel = get_audio_filepaths(manifest_entry=manifest_entry, audio_dir=audio_dir)
+    offset = manifest_entry.get("offset", 0.0)
+    duration = manifest_entry["duration"]
+
+    max_start = offset + duration - (n_samples / sample_rate)
+    start_sec = random.uniform(offset, max_start)
+
+    audio_segment = _segment_audio(
+        audio_filepath=audio_filepath_abs, sample_rate=sample_rate, offset=start_sec, n_samples=n_samples
+    )
+    audio = audio_segment.samples
+
+    if volume_level is not None:
+        audio = normalize_volume(audio, volume_level=volume_level)
+
+    return audio, audio_filepath_abs, audio_filepath_rel

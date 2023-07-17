@@ -54,6 +54,11 @@ def get_args():
     parser.add_argument(
         "--num_workers", default=1, type=int, help="Number of parallel threads to use. If -1 all CPUs are used."
     )
+    parser.add_argument(
+        "--dedupe_files",
+        action=argparse.BooleanOptionalAction,
+        help="If given, will only process the first manifest entry found for each audio file.",
+    )
     args = parser.parse_args()
     return args
 
@@ -65,6 +70,7 @@ def main():
     audio_dir = args.audio_dir
     feature_dir = args.feature_dir
     num_workers = args.num_workers
+    dedupe_files = args.dedupe_files
 
     if not manifest_path.exists():
         raise ValueError(f"Manifest {manifest_path} does not exist.")
@@ -77,6 +83,17 @@ def main():
     featurizers = feature_config.featurizers
 
     entries = read_manifest(manifest_path)
+
+    if dedupe_files:
+        final_entries = []
+        audio_filepath_set = set()
+        for entry in entries:
+            audio_filepath = entry["audio_filepath"]
+            if audio_filepath in audio_filepath_set:
+                continue
+            final_entries.append(entry)
+            audio_filepath_set.add(audio_filepath)
+        entries = final_entries
 
     for feature_name, featurizer in featurizers.items():
         print(f"Computing: {feature_name}")
