@@ -674,7 +674,7 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                     # [s, b] -> [b, s]
                     tokens_loss = tokens_loss.transpose(0, 1).contiguous()
 
-                    return tokens_loss
+                    return tokens_loss, [token_logits, speech_logits]
                 else:
                     # [s, b, h] -> [b, s, h]
                     token_logits = token_logits.transpose(0, 1).contiguous()
@@ -687,33 +687,33 @@ class MegatronTokenLevelEncoderDecoderModule(MegatronModule):
                 encoder_output = output
                 return encoder_output
 
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
         """For easy load when model is combined with other heads,
         add an extra key."""
 
         state_dict_ = {}
 
-        state_dict_[self._encoder_embedding_key] = self.encoder_embedding.state_dict_for_save_checkpoint(
+        state_dict_[self._encoder_embedding_key] = self.encoder_embedding.state_dict(
             destination, prefix, keep_vars
         )
-        state_dict_[self._decoder_embedding_key] = self.decoder_embedding.state_dict_for_save_checkpoint(
+        state_dict_[self._decoder_embedding_key] = self.decoder_embedding.state_dict(
             destination, prefix, keep_vars
         )
-        state_dict_[self._enc_dec_model_key] = self.enc_dec_model.state_dict_for_save_checkpoint(
+        state_dict_[self._enc_dec_model_key] = self.enc_dec_model.state_dict(
             destination, prefix, keep_vars
         )
-        state_dict_[self._tokens_head_key] = self.tokens_head.state_dict_for_save_checkpoint(
+        state_dict_[self._tokens_head_key] = self.tokens_head.state_dict(
             destination, prefix, keep_vars
         )
 
         if hasattr(self, "speech_tokens_heads"):
-            state_dict_["speech_tokens_heads"] = self.speech_tokens_heads.state_dict_for_save_checkpoint()
+            state_dict_["speech_tokens_heads"] = self.speech_tokens_heads.state_dict()
 
         if hasattr(self, "speech_residual_model_1"):
-            state_dict_["speech_residual_model_1"] = self.speech_residual_model_1.state_dict_for_save_checkpoint()
+            state_dict_["speech_residual_model_1"] = self.speech_residual_model_1.state_dict()
             
         if hasattr(self, "speech_residual_model_2"):
-            state_dict_["speech_residual_model_2"] = self.speech_residual_model_2.state_dict_for_save_checkpoint()
+            state_dict_["speech_residual_model_2"] = self.speech_residual_model_2.state_dict()
 
         return state_dict_
 

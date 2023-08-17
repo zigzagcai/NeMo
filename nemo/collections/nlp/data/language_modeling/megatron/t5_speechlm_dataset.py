@@ -176,8 +176,6 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
         i = 0
         print(f"copy_dataset len === {len(copy_dataset)}")
         for json_line in tqdm(copy_dataset):
-            if i > 1000:
-                break
             i+=1
 
             # Read example dict or load the information for a single example from .json file
@@ -224,7 +222,7 @@ class T5SpeechLMDataset(BasePromptLearningDataset):
                 total_context_len = context_tokens[0].size()[1]
                 reduced_len = min(400, int(total_context_len * 0.2) if total_context_len > 600 else int( total_context_len * random.uniform(0.2, 0.5) ))
                 start_token_index = random.randint(0, total_context_len - reduced_len)
-                context_tokens[0] = context_tokens[0][:, start_token_index:min(440, start_token_index+reduced_len)]
+                context_tokens[0] = context_tokens[0][:, start_token_index:min(start_token_index+440, start_token_index+reduced_len)]
                 if self.train_task != 'tts':
                     continue
             elif "Next token prediction" in question_in_manifest:
