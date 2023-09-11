@@ -174,7 +174,7 @@ class GPTModel(MegatronModule):
         # beta_fast=None,
         # beta_slow=None,
         # yarn_max_position_embeddings=None,
-        use_yarn=False
+        use_yarn=False,
     ):
         super(GPTModel, self).__init__(share_token_embeddings=share_embeddings_and_output_weights)
 
@@ -266,7 +266,7 @@ class GPTModel(MegatronModule):
             # beta_fast=beta_fast,
             # beta_slow=beta_slow,
             # yarn_max_position_embeddings=yarn_max_position_embeddings,
-            use_yarn=use_yarn
+            use_yarn=use_yarn,
         )
 
         if self.share_embeddings_and_output_weights:

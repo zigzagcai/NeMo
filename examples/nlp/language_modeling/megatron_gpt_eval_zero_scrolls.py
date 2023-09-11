@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import asyncio
-import os
 import json
+import os
 import threading
 from functools import partial
 
 import torch
+from constants import TASKS
 from omegaconf import OmegaConf, open_dict
+from prepare_truncated_data import process_data
 from pytorch_lightning.trainer.trainer import Trainer
 from torch.utils.data import DataLoader, Dataset
-from prepare_truncated_data import process_data
 
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
 from nemo.collections.nlp.modules.common.megatron.megatron_init import fake_initialize_model_parallel
@@ -33,7 +34,6 @@ from nemo.collections.nlp.parts.nlp_overrides import NLPDDPStrategy, NLPSaveRest
 from nemo.core.config import hydra_runner
 from nemo.utils.app_state import AppState
 from nemo.utils.model_utils import inject_model_parallel_rank
-from constants import TASKS
 
 try:
     from megatron.core import parallel_state
@@ -167,7 +167,7 @@ def main(cfg) -> None:
             # if cfg.inference.max_seq_length is not None:
             #     pretrained_cfg.encoder_seq_length = cfg.inference.max_seq_length
             #     pretrained_cfg.max_position_embeddings = cfg.inference.max_seq_length
-            
+
             pretrained_cfg.apply_query_key_layer_scaling = False
         model = MegatronGPTModel.restore_from(
             restore_path=cfg.gpt_model_file,
@@ -209,7 +209,7 @@ def main(cfg) -> None:
         model.model.language_model.encoder.activations_checkpoint_method = None
     except AttributeError:
         pass
-    
+
     length_params: LengthParam = {
         "max_length": cfg.inference.task,
         "min_length": cfg.inference.min_tokens_to_generate,
@@ -235,12 +235,14 @@ def main(cfg) -> None:
             nb_paddings += 1
 
     print("Processing data...")
-    original_lines, truncated_input = process_data(model.tokenizer,
-                         prompt=None,
-                         task=cfg.inference.task,
-                         max_seq_length=cfg.inference.max_seq_length,
-                         data_dir=cfg.inference.data_dir,
-                         n_jobs=cfg.inference.n_jobs)
+    original_lines, truncated_input = process_data(
+        model.tokenizer,
+        prompt=None,
+        task=cfg.inference.task,
+        max_seq_length=cfg.inference.max_seq_length,
+        data_dir=cfg.inference.data_dir,
+        n_jobs=cfg.inference.n_jobs,
+    )
 
     print("Running inference...")
     bs = cfg.inference.batch_size
@@ -269,6 +271,7 @@ def main(cfg) -> None:
         else:
             print(response)
     print("***************************")
+
 
 if __name__ == '__main__':
     main()  # noqa pylint: disable=no-value-for-parameter
