@@ -523,11 +523,11 @@ class TransformerLanguageModel(MegatronModule, adapter_mixins.AdapterModuleMixin
         ub_tp_comm_overlap=False,
         use_flash_attention=False,
         seq_len_interpolation_factor=None,
-        base=None,
-        extrapolation_factor=None,
-        attn_factor=None,
-        beta_fast=None,
-        beta_slow=None,
+        base=10000,
+        extrapolation_factor=1,
+        attn_factor=1,
+        beta_fast=32,
+        beta_slow=1,
         use_yarn=False,
     ):
         super(TransformerLanguageModel, self).__init__(share_token_embeddings=share_embeddings_and_output_weights)
