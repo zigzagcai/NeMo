@@ -141,11 +141,16 @@ def main(cfg) -> None:
     with open_dict(peft_model_cfg):
         # update the model config of the trained model with params we want to set at inference time.
         peft_model_cfg.precision = cfg.trainer.precision
+        if not peft_model_cfg.get('data', False):
+            peft_model_cfg.data = {}
+        peft_model_cfg.activations_checkpoint_num_layers = None
+        peft_model_cfg.sequence_parallel = False
         peft_model_cfg.data.test_ds = cfg.model.data.test_ds
         peft_model_cfg.activations_checkpoint_granularity = None
         peft_model_cfg.activations_checkpoint_method = None
         peft_model_cfg.activations_checkpoint_layers_per_pipeline = None
-        if peft_model_cfg.get("use_flash_attention", False):
+        
+        if peft_model_cfg.get("use_flash_attention", False) or cfg.model.get("use_flash_attention", False):
             peft_model_cfg.use_flash_attention = cfg.model.use_flash_attention
         if cfg.model.get("seq_len_interpolation_factor", None) is not None:
             peft_model_cfg["seq_len_interpolation_factor"] = cfg.model.seq_len_interpolation_factor
