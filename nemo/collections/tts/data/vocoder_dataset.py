@@ -67,8 +67,6 @@ class VocoderDataset(Dataset):
         max_duration: Optional float, if provided audio files in the training manifest longer than 'max_duration'
             will be ignored.
         trunc_duration: Optional int, if provided audio will be truncated to at most 'trunc_duration' seconds.
-        num_audio_retries: Number of read attempts to make when sampling audio file, to avoid training failing
-            from sporadic IO errors.
     """
 
     def __init__(
@@ -81,14 +79,12 @@ class VocoderDataset(Dataset):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         trunc_duration: Optional[float] = None,
-        num_audio_retries: int = 5,
     ):
         super().__init__()
 
         self.sample_rate = sample_rate
         self.n_samples = n_samples
         self.weighted_sampling_steps_per_epoch = weighted_sampling_steps_per_epoch
-        self.num_audio_retries = num_audio_retries
         self.load_precomputed_mel = False
 
         if trunc_duration:
@@ -121,24 +117,13 @@ class VocoderDataset(Dataset):
         )
         return sampler
 
-    def _segment_audio(self, audio_filepath: Path) -> AudioSegment:
-        # Retry file read multiple times as file seeking can produce random IO errors.
-        for _ in range(self.num_audio_retries):
-            try:
-                audio_segment = AudioSegment.segment_from_file(
-                    audio_filepath, target_sr=self.sample_rate, n_segments=self.n_samples,
-                )
-                return audio_segment
-            except Exception:
-                traceback.print_exc()
-
-        raise ValueError(f"Failed to read audio {audio_filepath}")
-
     def _sample_audio(self, audio_filepath: Path) -> Tuple[torch.Tensor, torch.Tensor]:
         if not self.n_samples:
             audio_array, _ = librosa.load(audio_filepath, sr=self.sample_rate)
         else:
-            audio_segment = self._segment_audio(audio_filepath)
+            audio_segment = AudioSegment.segment_from_file(
+                audio_filepath, target_sr=self.sample_rate, n_segments=self.n_samples, dtype="int32"
+            )
             audio_array = audio_segment.samples
 
         if self.trunc_samples:
