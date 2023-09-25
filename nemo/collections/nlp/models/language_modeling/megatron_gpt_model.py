@@ -1516,7 +1516,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # TODO: need to check if recompute APIs are matching up properly
         recompute_granularity = self.cfg.get('activations_checkpoint_granularity', None)
         recompute_method = self.cfg.get('activations_checkpoint_method', None)
-        recompute_num_layers = self.cfg.get('activations_checkpoint_num_layers', None)
+        recompute_num_layers = None if self.cfg.get('activations_checkpoint_num_layers', None)==0 else self.cfg.get('activations_checkpoint_num_layers', None)
 
         if not self.cfg.get('fp8', False):
             fp8 = None
