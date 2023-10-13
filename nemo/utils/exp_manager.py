@@ -172,6 +172,10 @@ class ExpManagerConfig:
     max_time_per_run: Optional[str] = None
     # time to sleep non 0 ranks during initialization
     seconds_to_sleep: float = 5
+    # global_batch_tokens = global_batch_size * encoder_seq_length
+    # gpu_num = num_nodes * devices
+    global_batch_tokens: Optional[int] = None
+    gpu_num: Optional[int] = None
 
 
 class TimingCallback(Callback):
@@ -179,8 +183,10 @@ class TimingCallback(Callback):
     Logs execution time of train/val/test steps
     """
 
-    def __init__(self, timer_kwargs={}):
+    def __init__(self, global_batch_tokens, gpu_num, timer_kwargs={}):
         self.timer = timers.NamedTimer(**timer_kwargs)
+        self.global_batch_tokens = global_batch_tokens
+        self.gpu_num = gpu_num
 
     def _on_batch_start(self, name):
         # reset only if we do not return mean of a sliding window
@@ -192,14 +198,25 @@ class TimingCallback(Callback):
     def _on_batch_end(self, name, pl_module):
         self.timer.stop(name)
         # Set the `batch_size=1` as WAR for `dataloader_iter`, which is not used for any metric
+        train_step_timing = self.timer[name]
         pl_module.log(
             name + ' in s',
-            self.timer[name],
+            train_step_timing,
             on_step=True,
             on_epoch=False,
             batch_size=1,
             prog_bar=(name == "train_step_timing"),
         )
+        if name == "train_step_timing":
+            tgs = self.global_batch_tokens / self.gpu_num / train_step_timing
+            pl_module.log(
+                'tgs',
+                tgs,
+                on_step=True,
+                on_epoch=False,
+                batch_size=1,
+                prog_bar=True,
+            )
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         self._on_batch_start("train_step_timing")
@@ -434,7 +451,7 @@ def exp_manager(trainer: 'pytorch_lightning.Trainer', cfg: Optional[Union[DictCo
 
     # add loggers timing callbacks
     if cfg.log_step_timing:
-        timing_callback = TimingCallback(timer_kwargs=cfg.step_timing_kwargs or {})
+        timing_callback = TimingCallback(cfg.global_batch_tokens, cfg.gpu_num, timer_kwargs=cfg.step_timing_kwargs or {})
         trainer.callbacks.insert(0, timing_callback)
 
     if cfg.ema.enable:

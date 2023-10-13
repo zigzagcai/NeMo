@@ -636,18 +636,18 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             loss_scale = self.trainer.precision_plugin.scaler._scale
             if loss_scale is not None:
                 self.log('loss_scale', loss_scale, batch_size=1)
-
-        self.log('reduced_train_loss', loss_mean, prog_bar=True, rank_zero_only=True, batch_size=1)
+        
+        self.log('step', self.trainer.global_step, prog_bar=True, rank_zero_only=True, batch_size=1)
+        self.log('loss', loss_mean, prog_bar=True, rank_zero_only=True, batch_size=1)
+        
         lr = self._optimizer.param_groups[0]['lr']
         self.log('lr', lr, rank_zero_only=True, batch_size=1)
-        self.log(
-            'global_step', self.trainer.global_step, prog_bar=True, rank_zero_only=True, batch_size=1,
-        )
-
+        
         consumed_samples = self._compute_consumed_samples_after_training_step()
         # TODO: make sure compute_consumed_samples works for pipeline parallelism
+        num_consumed_tokens = consumed_samples * self.cfg.get('encoder_seq_length')
         self.log(
-            'consumed_samples', consumed_samples, prog_bar=True, rank_zero_only=True, batch_size=1,
+            'num_consumed_tokens', num_consumed_tokens, prog_bar=True, rank_zero_only=True, batch_size=1,
         )
 
         if self.rampup_batch_size:
