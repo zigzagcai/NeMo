@@ -8,7 +8,7 @@ from typing import Iterator, TypeVar
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
-
+from megatron.core import parallel_state
 from nemo.utils import logging as logger
 
 T_co = TypeVar("T_co", covariant=True)
@@ -34,8 +34,8 @@ class DataParallelSampler(Sampler):
         drop_last: bool = False,
     ) -> None:
         self.dataset = dataset
-        self.num_replicas = gpc.get_world_size(ParallelMode.DATA)
-        self.rank = gpc.get_local_rank(ParallelMode.DATA)
+        self.num_replicas = parallel_state.get_data_parallel_world_size()
+        self.rank = parallel_state.get_data_parallel_rank()
         self.epoch = 0
         self.drop_last = drop_last
         # If the dataset length is evenly divisible by # of replicas, then there
@@ -137,7 +137,7 @@ def get_dpsampler_dataloader(
     """
     _kwargs = kwargs.copy()
 
-    if add_sampler and gpc.is_initialized(ParallelMode.DATA) and gpc.get_world_size(ParallelMode.DATA) > 1:
+    if add_sampler and parallel_state.get_data_parallel_world_size() > 1 and parallel_state._DATA_PARALLEL_GROUP is not None:
         sampler = DataParallelSampler(dataset, shuffle=shuffle, drop_last=drop_last)
     else:
         sampler = None
@@ -211,7 +211,7 @@ class StaticBatchSampler:
         self.start_bsz = start_bsz
         self.bsz_incre = bsz_incre
         self.incre_every = incre_every
-        if gpc.is_initialized(ParallelMode.PIPELINE):
+        if parallel_state._PIPELINE_MODEL_PARALLEL_GROUP is not None:
             assert (
                 batch_size - self.start_bsz
             ) % self.bsz_incre == 0, f"{batch_size} - {self.start_bsz} should be multiple of {self.bsz_incre}"

@@ -25,6 +25,15 @@ from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.accelerators import CPUAccelerator
 from pytorch_lightning.trainer.trainer import Trainer
 
+from nemo.collections.nlp.data.language_modeling.megatron.packed_dataset import (
+    PackedDataset,
+    PackedDatasetWithoutCuSeqlen,
+    get_packed_dataset_without_short_length,
+)
+from nemo.collections.nlp.data.language_modeling.megatron.collaters import jsonl_ds_collate_fn, packed_collate_fn
+from nemo.collections.nlp.data.language_modeling.megatron.batch_sampler import StaticBatchSampler, get_dpsampler_dataloader
+from nemo.collections.nlp.data.language_modeling.megatron.dummy_dataset import RandomDataset
+from nemo.collections.nlp.data.language_modeling.megatron.dataset import get_dataset_dict
 from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import (
     MegatronPretrainingRandomSampler,
     MegatronPretrainingSampler,
@@ -281,6 +290,14 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         if self.use_loss_mask and self.transformer_config.sequence_parallel:
             raise ValueError('Loss mask is not supported with sequence parallelism.')
+        
+        # internlm required
+        self.micro_batch_size = cfg.get("micro_batch_size")
+        self.global_batch_size = cfg.get("global_batch_size")
+        self.encoder_seq_length = cfg.get("encoder_seq_length")
+        self.min_length = cfg.get("min_length")
+        self.use_flash_attention = cfg.get("use_flash_attention")
+        self.pack_sample_into_one = cfg.get("pack_sample_into_one")
 
     def get_gpt_module_list(self):
         if isinstance(self.model, list):
@@ -810,8 +827,14 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
             # Get data batch
             batch = next(dataloader_iter)
+            logging.info(f"bbbbbbbbbbbbbbbbb{len(batch)}")
+            logging.info(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb{batch}")
+            logging.info(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb{batch[0]}")
+            batch = batch[0]
+            logging.info(f"ccccccccccccccccccccccccccccc{batch['cu_seqlens']}")
 
             # Transfer needed data to GPU
+            '''
             required_keys = set()
             if parallel_state.get_pipeline_model_parallel_world_size() == 1:
                 required_keys.update(batch.keys())
@@ -824,12 +847,15 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             if self.get_attention_mask_from_fusion:
                 required_keys.remove('attention_mask')
             batch = {key: val.cuda(non_blocking=True) if key in required_keys else None for key, val in batch.items()}
+            '''
+
+            logging.info(f"ccccccccccccccccccccccccccccc{batch}")
 
             # Model forward pass
             forward_args = {
-                'input_ids': batch['tokens'],
-                'position_ids': batch['position_ids'],
-                'attention_mask': batch['attention_mask'],
+                'input_ids': batch['input_ids'],
+                'position_ids': batch['indexes'],
+                #'attention_mask': batch['attention_mask'],
                 'labels': batch['labels'],
                 'loss_mask': batch['loss_mask'],
             }
@@ -985,6 +1011,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()  # sequence level nll
         return loss
 
+    '''
     def build_train_valid_test_datasets(self):
         # Override limit_val_batches to be a multiple of num microbatches to prevent val_step from exiting in between a step
         self._reconfigure_val_batches()
@@ -1028,7 +1055,33 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         logging.info(f'Finished building GPT datasets.')
 
         return self._train_ds, self._validation_ds, self._test_ds
+    '''
+    def build_train_valid_test_datasets(self):
+        if self.cfg.data.folder is None:
+            random_ds = RandomDataset(num_samples=1000000, max_len=self.encoder_seq_length)
+            if self.pack_sample_into_one:
+                self._train_ds = PackedDatasetWithoutCuSeqlen(
+                    random_ds, max_length_per_sample=self.encoder_seq_length, packed_length=self.micro_batch_size * self.encoder_seq_length
+                )
+            else:
+                self._train_ds = PackedDataset(
+                    random_ds, max_length_per_sample=self.encoder_seq_length, packed_length=self.micro_batch_size * self.encoder_seq_length
+                )
+        else:
+            self._train_ds = get_packed_dataset_without_short_length(
+                    folder=self.cfg.data.folder,
+                    packed_length=self.micro_batch_size * self.encoder_seq_length,
+                    max_length_per_sample=self.encoder_seq_length,
+                    show_progress=parallel_state.get_data_parallel_rank(),
+                    min_length=self.min_length,
+                    min_length_dict={},
+                    pack_into_one_sample=self.pack_sample_into_one,
+                    micro_batch_size=self.micro_batch_size,
+                    use_flash_attn=self.use_flash_attention,
+            )
+        return self._train_ds
 
+    '''
     def build_pretraining_data_loader(
         self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False
     ):
@@ -1070,6 +1123,33 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             pin_memory=True,
             persistent_workers=True if self.cfg.data.num_workers > 0 else False,
         )
+    '''
+    def build_pretraining_data_loader(
+            self, dataset
+    ):
+        # partition already completed
+        assert isinstance(dataset, (PackedDataset, PackedDatasetWithoutCuSeqlen, torch.utils.data.ConcatDataset))
+        # Create the training dataset sampler
+        train_sampler = StaticBatchSampler(
+            dataset.datasets if isinstance(dataset, torch.utils.data.ConcatDataset) else [dataset],
+            batch_size=self.global_batch_size // parallel_state.get_data_parallel_world_size(), ## T.B.A.C.Z
+            rampup_batch_size="", ## T.B.A.C.Z
+            micro_bsz=self.micro_batch_size,
+            seed=1024,
+            drop_last=True,
+            data_rank=parallel_state.get_data_parallel_rank(),
+            data_world_size=parallel_state.get_data_parallel_world_size(),
+        )
+        train_collate_fn = partial(packed_collate_fn, packed_length=self.micro_batch_size * self.encoder_seq_length)
+        train_dl = torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_sampler=train_sampler,
+            num_workers=2,
+            pin_memory=True,
+            collate_fn=train_collate_fn,
+            persistent_workers=2,
+        )
+        return train_dl
 
     def setup(self, stage=None):
         """ PTL hook that is executed after DDP spawns.
@@ -1112,10 +1192,13 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         else:
             # TODO: consider adding a ModelPT guard to check if model is being restored.
             # allowing restored models to optionally setup datasets
+            logging.info(f"hhhhhhhhhhhhhhhhhhwocao1")
             self.build_train_valid_test_datasets()
+            logging.info(f"hhhhhhhhhhhhhhhhhhwocao2")
             self.setup_training_data(self.cfg.data)
-            self.setup_validation_data(self.cfg.data)
-            self.setup_test_data(self.cfg.data)
+            logging.info(f"hhhhhhhhhhhhhhhhhhwocao3")
+            ## self.setup_validation_data(self.cfg.data)
+            ## self.setup_test_data(self.cfg.data)
 
         if stage == 'fit':
             if parallel_state.get_pipeline_model_parallel_world_size() > 1:
@@ -1137,32 +1220,53 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
     def setup_training_data(self, cfg):
         if hasattr(self, '_train_ds'):
-            consumed_samples = self.compute_consumed_samples(0)
-            logging.info(
-                f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
-            )
-            self._train_dl = self.build_pretraining_data_loader(self._train_ds, consumed_samples)
+            self._train_dl = self.build_pretraining_data_loader(self._train_ds)
 
+    
     def setup_validation_data(self, cfg):
-        if hasattr(self, '_validation_ds'):
-            consumed_samples = 0
+        valid_folder = self.cfg.data.valid_folder
+        if not valid_folder:
+            val_ds = RandomDataset(num_samples=parallel_state.get_data_parallel_world_size() * 500, max_len=self.cfg.data.seq_len)
+        else:
+            val_ds = get_dataset_dict(folder=valid_folder, split="")
+
+        if not isinstance(val_ds, dict):
+            val_ds = {"val": val_ds}
+
+        if val_collate_fn is None or not valid_folder:
+            val_collate_fn = partial(jsonl_ds_collate_fn, max_length_per_sample=self.cfg.data.seq_len)
+
+        val_dls = {}
+        for val_name, ds in val_ds.items():
+            # making the batch_size of validate larger can speed up the evaluation, but it should not be too large,
+            # otherwise too much data may be dropped
+            batch_size = min(
+                self.cfg.model.valid_micro_num * self.cfg.model.micro_batch_size, len(ds) // parallel_state.get_data_parallel_world_size()
+            )
+            batch_size = batch_size // self.cfg.model.micro_batch_size * self.cfg.model.micro_batch_size
+
+            if batch_size == 0 and parallel_state.is_rank_for_log():
+                logging.info(f"skip validate {val_name}.")
+                continue
+
+            val_dls[val_name] = get_dpsampler_dataloader(
+                ds,
+                shuffle=False,
+                num_workers=self.cfg.data.num_worker,
+                batch_size=batch_size,
+                collate_fn=val_collate_fn,
+                drop_last=True,
+            )  # drop_last=True, otherwise it may cause problems in the last batch
+
+        if parallel_state.is_rank_for_log():
             logging.info(
-                f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
+                f"load validation dataset {val_name} with valid batch size {str(batch_size)} and "
+                f"samples {str(len(val_dls[val_name]))}."
             )
 
-            drop_last = True
-            if not self.cfg.data.get('validation_drop_last', True):
-                logging.info(f'Drop last in validation dataset is set to False')
-                drop_last = False
-            pad_samples_to_global_batch_size = False
-            if self.cfg.data.get('pad_samples_to_global_batch_size', False):
-                logging.info('pad_samples_to_global_batch_size set to True')
-                pad_samples_to_global_batch_size = True
-
-            self._validation_dl = self.build_pretraining_data_loader(
-                self._validation_ds, consumed_samples, "validation", drop_last, pad_samples_to_global_batch_size
-            )
-
+        return val_dls
+    
+    '''
     def setup_test_data(self, cfg):
         if hasattr(self, '_test_ds'):
             consumed_samples = 0
@@ -1170,6 +1274,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 f'Setting up test dataloader with len(len(self._test_ds)): {len(self._test_ds)} and consumed samples: {consumed_samples}'
             )
             self._test_dl = self.build_pretraining_data_loader(self._test_ds, consumed_samples)
+    '''
 
     def generate(
         self,

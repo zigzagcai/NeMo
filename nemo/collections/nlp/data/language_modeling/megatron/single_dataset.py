@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from nemo.utils import logging as logger
 
 class JsonlDataset(torch.utils.data.Dataset):
     """
@@ -45,8 +46,14 @@ class JsonlDataset(torch.utils.data.Dataset):
         except Exception as e:
             print(f"Cannot load file {self.meta}...")
             raise e
+        
+        
+
         self.offsets = meta[:, 0]
         self.lengths = meta[:, -1]
+
+        logger.info(f"yyyyyyyyyyyyyyyyyyyy11{self.offsets}")
+        logger.info(f"yyyyyyyyyyyyyyyyyyyy22{self.lengths}")
 
         if min_length > 0:
             mask = self.lengths >= min_length
@@ -56,6 +63,7 @@ class JsonlDataset(torch.utils.data.Dataset):
             self.lengths = self.lengths[mask]
 
     def __getitem__(self, idx):
+        logger.info(f"yyyyyyyyyyyyyyyyyyyy33{idx}")
         f = self._get_mmap()
         position = self.offsets[idx]
         f.seek(position)

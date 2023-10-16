@@ -26,12 +26,12 @@ def unpack_data(input_ids, cu_seqlens):
 
     bsz = input_ids.shape[0]
 
-    num_sequence = gpc.config.data["micro_bsz"]
+    num_sequence = 1 # gpc.config.data["micro_bsz"]
 
-    outputs = torch.zeros(bsz, num_sequence, gpc.config.data.seq_len, device=input_ids.device, dtype=input_ids.dtype)
+    outputs = torch.zeros(bsz, num_sequence, 4096, device=input_ids.device, dtype=input_ids.dtype)
 
     for i in range(bsz):
-        output = torch.zeros(num_sequence, gpc.config.data.seq_len, device=input_ids.device, dtype=input_ids.dtype)
+        output = torch.zeros(num_sequence, 4096, device=input_ids.device, dtype=input_ids.dtype)
         cu_seqlens_slice = cu_seqlens[i]
         for j in range(num_sequence):
             seq_length = cu_seqlens_slice[j + 1] - cu_seqlens_slice[j]

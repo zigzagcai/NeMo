@@ -15,6 +15,7 @@ from tqdm import tqdm
 from nemo.collections.nlp.data.language_modeling.megatron.single_dataset import JsonlDataset
 from nemo.collections.nlp.data.language_modeling.megatron.utils import get_dataset_type_id
 from nemo.utils import logging as logger
+from megatron.core import parallel_state
 
 DEFAULT_SEED = 1024
 
@@ -34,6 +35,8 @@ class PackedDataset(torch.utils.data.Dataset):
         dataset,
         max_length_per_sample: int = 2048,
         packed_length: int = 4096,
+        micro_batch_size = 1,
+        use_flash_attn = True,
     ):
         assert hasattr(dataset, "lengths")
         assert len(getattr(dataset, "lengths")) == len(
@@ -48,6 +51,8 @@ class PackedDataset(torch.utils.data.Dataset):
         self.seed = DEFAULT_SEED
         self.sample_indices, self.len_samples_shuffled, self.acm_len_samples = self.accu_sample_len(seed=self.seed)
         self.num_tokens = sum(self.lengths)
+        self.micro_batch_size = micro_batch_size
+        self.use_flash_attn = use_flash_attn
 
     def get_dataset_name(self):
         return self.dataset.get_dataset_name()
@@ -145,9 +150,9 @@ class PackedDataset(torch.utils.data.Dataset):
         if index == 0:
             pre_pos = 0
         else:
-            pre_pos = index * gpc.config.data["micro_bsz"]
+            pre_pos = index * self.micro_batch_size
 
-        pos = (index + 1) * gpc.config.data["micro_bsz"]
+        pos = (index + 1) * self.micro_batch_size
         return pre_pos, pos
 
     def build_unpack(self, index):
@@ -193,7 +198,7 @@ class PackedDataset(torch.utils.data.Dataset):
         }
         """
 
-        if gpc.config.model.use_flash_attn:
+        if self.use_flash_attn:
             pos_before, token_id_before, pos_after, token_id_after = self.mapping(item)
             return self.build_pack(pos_before, token_id_before, pos_after, token_id_after)
 
@@ -279,13 +284,13 @@ class PackedDatasetWithoutCuSeqlen(torch.utils.data.Dataset):
         pack_labels = []
         type_ids = []
 
-        self.pdebug(f"item : {item}, start_idx:{start_idx}, start_length:{start_length} ")
-        self.pdebug(f"item : {item}, end_idx:{end_idx}, end_length:{end_length} ")
+        logger.info(f"item : {item}, start_idx:{start_idx}, start_length:{start_length} ")
+        logger.info(f"item : {item}, end_idx:{end_idx}, end_length:{end_length} ")
 
         if start_idx == end_idx:
             idx = self.indices[start_idx]
             sample = self.dataset[idx]
-            self.pdebug(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
+            logger.info(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
             tokens = sample["tokens"][start_length:end_length]
             pack_tokens.extend(tokens)
             pack_labels.extend(tokens[1:] + [-100])
@@ -299,8 +304,9 @@ class PackedDatasetWithoutCuSeqlen(torch.utils.data.Dataset):
             }
 
         idx = self.indices[start_idx]
+        logger.info(f"hhhhhhhhhhhhhhhhhhhhhhwwwww{idx}")
         sample = self.dataset[idx]
-        self.pdebug(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
+        logger.info(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
         tokens = sample["tokens"][start_length:]
         pack_tokens.extend(tokens)
         pack_labels.extend(tokens[1:] + [-100])
@@ -309,7 +315,7 @@ class PackedDatasetWithoutCuSeqlen(torch.utils.data.Dataset):
         for i in range(start_idx + 1, end_idx):
             idx = self.indices[i]
             sample = self.dataset[idx]
-            self.pdebug(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
+            logger.info(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
             tokens = sample["tokens"]
             pack_tokens.extend(tokens)
             pack_labels.extend(tokens[1:] + [-100])
@@ -321,7 +327,7 @@ class PackedDatasetWithoutCuSeqlen(torch.utils.data.Dataset):
         else:
             idx = self.indices[end_idx]
             sample = self.dataset[idx]
-            self.pdebug(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
+            logger.info(f"item : {item}, idx: {idx}, len : {len(sample['tokens'])}")
             tokens = sample["tokens"][:end_length]
             pack_tokens.extend(tokens)
             pack_labels.extend(tokens[1:] + [-100])
@@ -344,7 +350,10 @@ def get_packed_dataset_without_short_length(
     min_length=50,
     min_length_dict=None,
     pack_into_one_sample=False,
+    micro_batch_size=1,
+    use_flash_attn=True,
 ):
+    data_parallel_rank = parallel_state.get_data_parallel_rank()
     """
     Given a folder, combine all the .bin files into a single large dataset.
     And filter out short samples with length less than 'min_length'.
@@ -371,7 +380,7 @@ def get_packed_dataset_without_short_length(
 
     for root, dirs, files in os.walk(folder, followlinks=True):
         dirs.sort()  # Let the folder need to be returned in a fixed order
-        if gpc.is_rank_for_log():
+        if data_parallel_rank==0:
             logger.info(f"Reading {root}...")
         num_token_in_folder = 0
 
@@ -395,20 +404,20 @@ def get_packed_dataset_without_short_length(
                 if hasattr(ds, "old_length"):
                     delete_samples += ds.old_length - len(ds)
                 if len(ds) == 0:
-                    if gpc.is_rank_for_log():
+                    if data_parallel_rank==0:
                         logger.info(f"None of the data in `{fp}` is longer than {min_length}")
                     continue
 
                 if pack_into_one_sample:
                     ds = PackedDatasetWithoutCuSeqlen(ds, max_length_per_sample, packed_length)
                 else:
-                    ds = PackedDataset(ds, max_length_per_sample, packed_length)
+                    ds = PackedDataset(ds, max_length_per_sample, packed_length, micro_batch_size)
 
                 num_token_in_folder += len(ds) * packed_length
                 datasets.append(ds)
 
     dataset = ConcatDataset(datasets=datasets)
-    if gpc.is_rank_for_log():
+    if data_parallel_rank==0:
         logger.info(
             f"Find `{len(datasets)}` datasets, \
             {len(dataset)} samples, \
