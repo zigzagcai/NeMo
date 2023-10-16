@@ -18,6 +18,8 @@ import warnings
 from dataclasses import fields
 from functools import partial
 from typing import Any, Dict, Iterator, List, Optional, Union
+import numpy as np
+import scipy
 
 import torch
 from omegaconf import OmegaConf
@@ -25,6 +27,15 @@ from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.accelerators import CPUAccelerator
 from pytorch_lightning.trainer.trainer import Trainer
 
+from nemo.collections.nlp.data.language_modeling.megatron.packed_dataset import (
+    PackedDataset,
+    PackedDatasetWithoutCuSeqlen,
+    get_packed_dataset_without_short_length,
+)
+from nemo.collections.nlp.data.language_modeling.megatron.collaters import jsonl_ds_collate_fn, packed_collate_fn
+from nemo.collections.nlp.data.language_modeling.megatron.batch_sampler import StaticBatchSampler, get_dpsampler_dataloader
+from nemo.collections.nlp.data.language_modeling.megatron.dummy_dataset import RandomDataset
+from nemo.collections.nlp.data.language_modeling.megatron.dataset import get_dataset_dict
 from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import (
     MegatronPretrainingRandomSampler,
     MegatronPretrainingSampler,
@@ -281,7 +292,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         if self.use_loss_mask and self.transformer_config.sequence_parallel:
             raise ValueError('Loss mask is not supported with sequence parallelism.')
-
+        
     def get_gpt_module_list(self):
         if isinstance(self.model, list):
             return [
@@ -806,7 +817,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # return DataIteratorList(iters)
 
     def get_forward_output_and_loss_func(self, validation_step=False):
-        def fwd_output_and_loss_func(dataloader_iter, model, checkpoint_activations_all_layers=None):
+        def fwd_output_and_loss_func_megatron(dataloader_iter, model, checkpoint_activations_all_layers=None):
 
             # Get data batch
             batch = next(dataloader_iter)
@@ -871,7 +882,88 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
             return output_tensor, loss_func
 
-        return fwd_output_and_loss_func
+        def fwd_output_and_loss_func_internlm(dataloader_iter, model, checkpoint_activations_all_layers=None):
+
+            # Get data batch
+            tmp_batch = next(dataloader_iter)
+            ins = tmp_batch[0]
+
+            attention_mask = scipy.linalg.block_diag(*[np.tril(np.ones((l2-l1,l2-l1), dtype=bool)) for l1, l2 in zip(ins['cu_seqlens'][0][:-1], ins['cu_seqlens'][0][1:])])
+            position_ids = list(itertools.chain(*[np.arange(l2-l1) for l1, l2 in zip(ins['cu_seqlens'][0][:-1], ins['cu_seqlens'][0][1:])]))
+            
+            labels = tmp_batch[1]
+            loss_mask = labels != -100  # todo: check 1 is valid or 0 is valid
+
+            batch = {
+                'tokens': ins['input_ids'],
+                'position_ids': torch.tensor(position_ids, dtype=torch.int32).reshape(1,len(position_ids)),
+                'attention_mask': torch.tensor(attention_mask, dtype=torch.int32).reshape(1,1,len(attention_mask),len(attention_mask)),
+                'labels': labels,
+                'loss_mask': loss_mask,
+            }
+
+            # Transfer needed data to GPU          
+            required_keys = set()
+            if parallel_state.get_pipeline_model_parallel_world_size() == 1:
+                required_keys.update(batch.keys())
+            else:
+                required_keys.add('attention_mask')
+                if parallel_state.is_pipeline_first_stage():
+                    required_keys.update(('tokens', 'position_ids'))
+                if parallel_state.is_pipeline_last_stage():
+                    required_keys.update(('labels', 'loss_mask'))
+            if self.get_attention_mask_from_fusion:
+                required_keys.remove('attention_mask')
+            batch = {key: val.cuda(non_blocking=True) if key in required_keys else None for key, val in batch.items()}
+            
+            # Model forward pass
+            forward_args = {
+                'input_ids': batch['tokens'],
+                'position_ids': batch['position_ids'],
+                'attention_mask': batch['attention_mask'],
+                'labels': batch['labels'],
+                'loss_mask': batch['loss_mask'],
+            }
+
+            if not self.mcore_gpt:
+                forward_args['checkpoint_activations_all_layers'] = checkpoint_activations_all_layers
+                if not self.use_loss_mask:
+                    forward_args.pop('loss_mask')
+            else:
+                # TODO: @eharper can we add this to mcore?
+                forward_args.pop('loss_mask')
+            
+            output_tensor = model(**forward_args)
+
+            def loss_func(output_tensor):
+                # Loss for a micro-batch (ub)
+                loss_for_ub = self.loss_func(batch['loss_mask'], output_tensor)
+                if validation_step and not self.cfg.data.get('validation_drop_last', True):
+                    num_valid_tokens_in_ub = batch['loss_mask'].sum()
+                    if loss_for_ub.isnan():
+                        assert batch['loss_mask'].count_nonzero() == 0, 'Got NaN loss with non-empty input'
+                        loss_sum_for_ub = torch.zeros_like(num_valid_tokens_in_ub)
+                    else:
+                        loss_sum_for_ub = num_valid_tokens_in_ub * loss_for_ub
+
+                    loss_sum_and_ub_size_all_gpu = torch.cat(
+                        [
+                            loss_sum_for_ub.clone().detach().view(1),
+                            torch.tensor([num_valid_tokens_in_ub]).cuda().clone().detach(),
+                        ]
+                    )
+                    # Could potentially reduce num_valid_samples_in_microbatch and use that to aggregate instead of len(self._validation_ds)
+                    torch.distributed.all_reduce(
+                        loss_sum_and_ub_size_all_gpu, group=parallel_state.get_data_parallel_group()
+                    )
+                    return loss_for_ub, {'loss_sum_and_ub_size': loss_sum_and_ub_size_all_gpu}
+                else:
+                    reduced_loss = average_losses_across_data_parallel_group([loss_for_ub])
+                    return loss_for_ub, {'avg': reduced_loss}
+
+            return output_tensor, loss_func
+
+        return fwd_output_and_loss_func_internlm if self.cfg.data.use_internlm_dl else fwd_output_and_loss_func_megatron
 
     def get_forward_output_only_func(self):
         def fwd_output_only_func(dataloader_iter, model):
@@ -984,8 +1076,14 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # TODO: add nemo version here
         loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()  # sequence level nll
         return loss
-
+    
     def build_train_valid_test_datasets(self):
+        if self.cfg.data.use_internlm_dl:
+            return self.build_train_valid_test_datasets_internlm()
+        else:
+            return self.build_train_valid_test_datasets_megatron()
+
+    def build_train_valid_test_datasets_megatron(self):
         # Override limit_val_batches to be a multiple of num microbatches to prevent val_step from exiting in between a step
         self._reconfigure_val_batches()
         logging.info('Building GPT datasets.')
@@ -1029,7 +1127,42 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
         return self._train_ds, self._validation_ds, self._test_ds
 
+    def build_train_valid_test_datasets_internlm(self):
+        if self.cfg.data.train_folder is None:
+            random_ds = RandomDataset(num_samples=1000000, max_len=self.cfg.encoder_seq_length)
+            if self.cfg.data.pack_sample_into_one:
+                self._train_ds = PackedDatasetWithoutCuSeqlen(
+                    random_ds, max_length_per_sample=self.cfg.encoder_seq_length, packed_length=self.cfg.micro_batch_size * self.cfg.encoder_seq_length
+                )
+            else:
+                self._train_ds = PackedDataset(
+                    random_ds, max_length_per_sample=self.cfg.encoder_seq_length, packed_length=self.cfg.micro_batch_size * self.cfg.encoder_seq_length
+                )
+        else:
+            self._train_ds = get_packed_dataset_without_short_length(
+                    folder=self.cfg.data.train_folder,
+                    packed_length=self.cfg.micro_batch_size * self.cfg.encoder_seq_length,
+                    max_length_per_sample=self.cfg.encoder_seq_length,
+                    show_progress=parallel_state.get_data_parallel_rank(),
+                    min_length=self.cfg.data.min_length,
+                    min_length_dict={},
+                    pack_into_one_sample=self.cfg.data.pack_sample_into_one,
+                    micro_batch_size=self.cfg.micro_batch_size,
+                    use_flash_attn=self.cfg.use_flash_attention,
+            )
+        if self._train_ds is not None:
+            logging.info(f'Length of train dataset: {len(self._train_ds)}')
+        return self._train_ds
+
     def build_pretraining_data_loader(
+        self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False
+    ):
+        if self.cfg.data.use_internlm_dl:
+            return self.build_pretraining_data_loader_internlm(dataset)      
+        else:
+            return self.build_pretraining_data_loader_megatron(dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False)
+
+    def build_pretraining_data_loader_megatron(
         self, dataset, consumed_samples, dataset_type=None, drop_last=True, pad_samples_to_global_batch_size=False
     ):
         """Buld dataloader given an input dataset."""
@@ -1070,6 +1203,32 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             pin_memory=True,
             persistent_workers=True if self.cfg.data.num_workers > 0 else False,
         )
+
+    def build_pretraining_data_loader_internlm(
+            self, dataset
+    ):
+        assert isinstance(dataset, (PackedDataset, PackedDatasetWithoutCuSeqlen, torch.utils.data.ConcatDataset))
+        # Create the training dataset sampler
+        train_sampler = StaticBatchSampler(
+            dataset.datasets if isinstance(dataset, torch.utils.data.ConcatDataset) else [dataset],
+            batch_size=1, # for compatability with nemo-megatron input tensor shape
+            rampup_batch_size=self.cfg.get('rampup_batch_size', None),
+            micro_bsz=self.cfg.micro_batch_size,
+            seed=1024,
+            drop_last=True,
+            data_rank=parallel_state.get_data_parallel_rank(),
+            data_world_size=parallel_state.get_data_parallel_world_size(),
+        )
+        train_collate_fn = partial(packed_collate_fn, packed_length=self.cfg.micro_batch_size * self.cfg.encoder_seq_length)
+        train_dl = torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_sampler=train_sampler,
+            num_workers=self.cfg.data.num_workers,
+            pin_memory=True,
+            collate_fn=train_collate_fn,
+            persistent_workers=self.cfg.data.num_workers,
+        )
+        return train_dl
 
     def setup(self, stage=None):
         """ PTL hook that is executed after DDP spawns.
@@ -1114,8 +1273,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             # allowing restored models to optionally setup datasets
             self.build_train_valid_test_datasets()
             self.setup_training_data(self.cfg.data)
-            self.setup_validation_data(self.cfg.data)
-            self.setup_test_data(self.cfg.data)
+            ## self.setup_validation_data(self.cfg.data)
+            ## self.setup_test_data(self.cfg.data)
 
         if stage == 'fit':
             if parallel_state.get_pipeline_model_parallel_world_size() > 1:
@@ -1139,15 +1298,16 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         if hasattr(self, '_train_ds'):
             consumed_samples = self.compute_consumed_samples(0)
             logging.info(
-                f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
+                f'Setting up train dataloader with len(self._train_ds): {len(self._train_ds)} and consumed samples: {consumed_samples}'
             )
             self._train_dl = self.build_pretraining_data_loader(self._train_ds, consumed_samples)
+
 
     def setup_validation_data(self, cfg):
         if hasattr(self, '_validation_ds'):
             consumed_samples = 0
             logging.info(
-                f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
+                f'Setting up validation dataloader with len(self._validation_ds): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
             )
 
             drop_last = True
@@ -1162,14 +1322,16 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             self._validation_dl = self.build_pretraining_data_loader(
                 self._validation_ds, consumed_samples, "validation", drop_last, pad_samples_to_global_batch_size
             )
-
+    
+    
     def setup_test_data(self, cfg):
         if hasattr(self, '_test_ds'):
             consumed_samples = 0
             logging.info(
-                f'Setting up test dataloader with len(len(self._test_ds)): {len(self._test_ds)} and consumed samples: {consumed_samples}'
+                f'Setting up test dataloader with len(self._test_ds): {len(self._test_ds)} and consumed samples: {consumed_samples}'
             )
             self._test_dl = self.build_pretraining_data_loader(self._test_ds, consumed_samples)
+    
 
     def generate(
         self,
