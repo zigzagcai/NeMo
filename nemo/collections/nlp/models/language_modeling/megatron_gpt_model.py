@@ -18,6 +18,8 @@ import warnings
 from dataclasses import fields
 from functools import partial
 from typing import Any, Dict, Iterator, List, Optional, Union
+import numpy as np
+import scipy
 
 import torch
 from omegaconf import OmegaConf
@@ -827,11 +829,13 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
 
             # Get data batch
             batch = next(dataloader_iter)
-            logging.info(f"bbbbbbbbbbbbbbbbb{len(batch)}")
-            logging.info(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb{batch}")
-            logging.info(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb{batch[0]}")
-            batch = batch[0]
-            logging.info(f"ccccccccccccccccccccccccccccc{batch['cu_seqlens']}")
+
+            ins = batch[0]
+            import pdb; pdb.set_trace()
+
+            attention_mask = scipy.linalg.block_diag(*[np.tril(np.ones((l2-l1,l2-l1), dtype=bool)) for l1, l2 in zip(ins['cu_seqlens'][:-1], ins['cu_seqlens'][1:])])
+            position_ids = list(itertools.chain(*[np.arange(l2-l1) for l1, l2 in zip(ins['cu_seqlens'][:-1], ins['cu_seqlens'][1:])]))
+            loss_mask = ins['labels'] != -100  # todo: check 1 is valid or 0 is valid
 
             # Transfer needed data to GPU
             '''
@@ -849,16 +853,15 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             batch = {key: val.cuda(non_blocking=True) if key in required_keys else None for key, val in batch.items()}
             '''
 
-            logging.info(f"ccccccccccccccccccccccccccccc{batch}")
-
             # Model forward pass
             forward_args = {
-                'input_ids': batch['input_ids'],
-                'position_ids': batch['indexes'],
-                #'attention_mask': batch['attention_mask'],
-                'labels': batch['labels'],
-                'loss_mask': batch['loss_mask'],
+                'input_ids': ins['input_ids'],
+                'position_ids': position_ids,
+                'attention_mask': attention_mask,
+                'labels': batch[1],
+                'loss_mask': loss_mask,
             }
+            batch = forward_args
 
             if not self.mcore_gpt:
                 forward_args['checkpoint_activations_all_layers'] = checkpoint_activations_all_layers
@@ -1192,11 +1195,8 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         else:
             # TODO: consider adding a ModelPT guard to check if model is being restored.
             # allowing restored models to optionally setup datasets
-            logging.info(f"hhhhhhhhhhhhhhhhhhwocao1")
             self.build_train_valid_test_datasets()
-            logging.info(f"hhhhhhhhhhhhhhhhhhwocao2")
             self.setup_training_data(self.cfg.data)
-            logging.info(f"hhhhhhhhhhhhhhhhhhwocao3")
             ## self.setup_validation_data(self.cfg.data)
             ## self.setup_test_data(self.cfg.data)
 
