@@ -210,7 +210,7 @@ class TimingCallback(Callback):
         if name == "train_step_timing":
             tgs = self.global_batch_tokens / self.gpu_num / train_step_timing
             pl_module.log(
-                'tgs',
+                'tgs (tokens/gpu/second)',
                 tgs,
                 on_step=True,
                 on_epoch=False,

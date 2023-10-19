@@ -649,7 +649,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 self.log('loss_scale', loss_scale, batch_size=1)
         
         self.log('step', self.trainer.global_step, prog_bar=True, rank_zero_only=True, batch_size=1)
-        self.log('loss', loss_mean, prog_bar=True, rank_zero_only=True, batch_size=1)
+        self.log('loss_from_metric', loss_mean, prog_bar=True, rank_zero_only=True, batch_size=1)
         
         lr = self._optimizer.param_groups[0]['lr']
         self.log('lr', lr, rank_zero_only=True, batch_size=1)
