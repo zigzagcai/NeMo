@@ -660,6 +660,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         self.log(
             'num_consumed_tokens', num_consumed_tokens, prog_bar=True, rank_zero_only=True, batch_size=1,
         )
+        self.log('consumed_samples', consumed_samples, prog_bar=True, rank_zero_only=True, batch_size=1,)
 
         if self.rampup_batch_size:
             self.prev_global_batch_size = current_global_batch_size
