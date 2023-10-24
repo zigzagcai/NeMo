@@ -310,6 +310,7 @@ class NLPModel(ModelPT, Exportable):
         map_location: Any = None,
         hparams_file: Optional[str] = None,
         strict: bool = True,
+        convert_ckpt: bool = False,
         **kwargs,
     ):
         """
@@ -393,6 +394,8 @@ class NLPModel(ModelPT, Exportable):
                     model.trainer.strategy.setup_environment()
                 # load the checkpoint from disk
                 checkpoint = dist_checkpointing.load(sharded_state_dict=checkpoint, checkpoint_dir=checkpoint_dir)
+                if convert_ckpt:
+                    return checkpoint
                 # restore the weights
                 model.on_load_checkpoint(checkpoint)
                 if hasattr(model, 'setup_transformer_engine_tp_groups'):
