@@ -397,6 +397,7 @@ class NLPDDPStrategy(DDPStrategy):
             and self.lightning_module.sharded_state_dict() is not None
         ):
             if self.is_global_zero:
+                # uncomment this line to reserve all the ckpt during pretraining
                 shutil.rmtree(ckpt_to_dir(filepath))
 
         # legacy checkpoint logic, does not use megatron core
