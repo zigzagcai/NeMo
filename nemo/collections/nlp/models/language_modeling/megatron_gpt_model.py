@@ -1212,7 +1212,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         # Create the training dataset sampler
         train_sampler = StaticBatchSampler(
             dataset.datasets if isinstance(dataset, torch.utils.data.ConcatDataset) else [dataset],
-            batch_size=1, # for compatability with nemo-megatron input tensor shape
+            batch_size=self.cfg.micro_batch_size, # for compatability with nemo-megatron input tensor shape
             rampup_batch_size=self.cfg.get('rampup_batch_size', None),
             micro_bsz=self.cfg.micro_batch_size,
             seed=1024,
